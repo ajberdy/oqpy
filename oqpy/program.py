@@ -23,6 +23,7 @@ AST components), and the class has methods which add to the current state.
 
 from __future__ import annotations
 
+import warnings
 from copy import deepcopy
 from typing import Any, Iterable, Iterator, Optional
 
@@ -54,12 +55,15 @@ class ProgramState:
     """
 
     def __init__(self) -> None:
-        self.body: list[ast.Statement] = []
+        self.body: list[ast.Statement | ast.Pragma] = []
         self.if_clause: Optional[ast.BranchingStatement] = None
+        self.annotations: list[ast.Annotation] = []
 
     def add_if_clause(self, condition: ast.Expression, if_clause: list[ast.Statement]) -> None:
+        if_clause_annotations, self.annotations = self.annotations, []
         self.finalize_if_clause()
         self.if_clause = ast.BranchingStatement(condition, if_clause, [])
+        self.if_clause.annotations = if_clause_annotations
 
     def add_else_clause(self, else_clause: list[ast.Statement]) -> None:
         if self.if_clause is None:
@@ -72,7 +76,14 @@ class ProgramState:
             if_clause, self.if_clause = self.if_clause, None
             self.add_statement(if_clause)
 
-    def add_statement(self, stmt: ast.Statement) -> None:
+    def add_statement(self, stmt: ast.Statement | ast.Pragma) -> None:
+        # This function accepts Statement and Pragma even though
+        # it seems to conflict with the definition of ast.Program.
+        # Issue raised in https://github.com/openqasm/openqasm/issues/468
+        assert isinstance(stmt, (ast.Statement, ast.Pragma))
+        if isinstance(stmt, ast.Statement) and self.annotations:
+            stmt.annotations = self.annotations + list(stmt.annotations)
+            self.annotations = []
         self.finalize_if_clause()
         self.body.append(stmt)
 
@@ -149,6 +160,8 @@ class Program:
         """Close a context by removing the program state from the top stack, and return it."""
         state = self.stack.pop()
         state.finalize_if_clause()
+        if state.annotations:
+            warnings.warn(f"Annotation(s) {state.annotations} not applied to any statement")
         return state
 
     def _add_var(self, var: Var) -> None:
@@ -259,6 +272,8 @@ class Program:
 
         assert len(self.stack) == 1
         self._state.finalize_if_clause()
+        if self._state.annotations:
+            warnings.warn(f"Annotation(s) {self._state.annotations} not applied to any statement")
         statements = []
         if include_externs:
             statements += self._make_externs_statements(encal_declarations)
@@ -447,6 +462,13 @@ class Program:
         )
         return self
 
+    def pragma(self, command: str) -> Program:
+        """Add a pragma instruction."""
+        if len(self.stack) != 1:
+            raise RuntimeError("Pragmas must be global")
+        self._add_statement(ast.Pragma(command))
+        return self
+
     def _do_assignment(self, var: AstConvertible, op: str, value: AstConvertible) -> None:
         """Helper function for variable assignment operations."""
         if isinstance(var, classical_types.DurationVar):
@@ -458,6 +480,11 @@ class Program:
                 to_ast(self, value),
             )
         )
+
+    def do_expression(self, expression: AstConvertible) -> Program:
+        """Add a statement which evaluates a given expression without assigning the output."""
+        self._add_statement(ast.ExpressionStatement(to_ast(self, expression)))
+        return self
 
     def set(
         self,
@@ -482,6 +509,11 @@ class Program:
         """In-place update of a variable to be itself modulo value."""
         assert isinstance(var, classical_types.IntVar)
         self._do_assignment(var, "%=", value)
+        return self
+
+    def annotate(self, keyword: str, command: Optional[str] = None) -> Program:
+        """Add an annotation to the next statement."""
+        self._state.annotations.append(ast.Annotation(keyword, command))
         return self
 
 
@@ -517,7 +549,9 @@ class MergeCalStatementsPass(QASMVisitor[None]):
         node.body = self.process_statement_list(node.body)
         self.generic_visit(node, context)
 
-    def process_statement_list(self, statements: list[ast.Statement]) -> list[ast.Statement]:
+    def process_statement_list(
+        self, statements: list[ast.Statement | ast.Pragma]
+    ) -> list[ast.Statement | ast.Pragma]:
         new_list = []
         cal_stmts = []
         for stmt in statements:
