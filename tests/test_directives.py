@@ -26,7 +26,7 @@ import oqpy
 from oqpy import *
 from oqpy.base import expr_matches, logical_and, logical_or
 from oqpy.quantum_types import PhysicalQubits
-from oqpy.classical_types import _RangeDefinition
+from oqpy.classical_types import RangeDefinition
 from oqpy.timing import OQDurationLiteral
 
 
@@ -573,11 +573,11 @@ def test_for_range_definition():
 
     start = oqpy.IntVar(1, name="start")
     stop = oqpy.IntVar(5, name="stop")
-    range_definition = _RangeDefinition(start + 1, stop**2, 2)
+    range_definition = RangeDefinition(start + 1, stop**2, 2)
     with oqpy.ForIn(prog, range_definition, "i") as index:
         prog.increment(a, index)
 
-    range_definition = _RangeDefinition(5)
+    range_definition = RangeDefinition(5)
     with oqpy.ForIn(prog, range_definition, "j") as index:
         prog.increment(a, index)
 

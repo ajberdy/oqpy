@@ -447,7 +447,7 @@ class OQFunctionCall(OQPyExpression):
         return ast.FunctionCall(self.identifier, map_to_ast(program, self.args))
 
 
-class _RangeDefinition(OQPyExpression):
+class RangeDefinition(OQPyExpression):
     type_cls: Type[ast.RangeDefinition]
 
     """An oqpy expression corresponding a range definition."""
