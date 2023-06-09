@@ -26,6 +26,7 @@ import oqpy
 from oqpy import *
 from oqpy.base import expr_matches, logical_and, logical_or
 from oqpy.quantum_types import PhysicalQubits
+from oqpy.classical_types import _RangeDefinition
 from oqpy.timing import OQDurationLiteral
 
 
@@ -563,6 +564,39 @@ def test_for_in_var_types():
     ).strip()
 
     assert program.to_qasm() == expected
+
+
+def test_for_range_definition():
+    prog = Program()
+    a = oqpy.IntVar(0, name="a")
+    prog.declare(a)
+
+    start = oqpy.IntVar(1, name="start")
+    stop = oqpy.IntVar(5, name="stop")
+    range_definition = _RangeDefinition(start + 1, stop**2, 2)
+    with oqpy.ForIn(prog, range_definition, "i") as index:
+        prog.increment(a, index)
+
+    range_definition = _RangeDefinition(5)
+    with oqpy.ForIn(prog, range_definition, "j") as index:
+        prog.increment(a, index)
+
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        int[32] start = 1;
+        int[32] stop = 5;
+        int[32] a = 0;
+        for int i in [start + 1:2:stop ** 2] {
+            a += i;
+        }
+        for int j in [0:5] {
+            a += j;
+        }
+        """
+    ).strip()
+
+    assert prog.to_qasm() == expected
 
 
 def test_while():

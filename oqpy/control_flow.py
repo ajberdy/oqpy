@@ -28,6 +28,7 @@ from oqpy.classical_types import (
     DurationVar,
     IntVar,
     _ClassicalVar,
+    _RangeDefinition,
     convert_range,
 )
 from oqpy.timing import make_duration
@@ -132,6 +133,8 @@ def ForIn(
     elif isinstance(iterator, _ClassicalVar):
         set_declaration = to_ast(program, iterator)
         assert isinstance(set_declaration, ast.Identifier), type(set_declaration)
+    elif isinstance(iterator, _RangeDefinition):
+        set_declaration = iterator.to_ast(program)
     else:
         raise TypeError(f"'{type(iterator)}' object is not iterable")
 

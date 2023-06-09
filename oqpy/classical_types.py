@@ -445,3 +445,28 @@ class OQFunctionCall(OQPyExpression):
         if self.subroutine_decl is not None:
             program._add_subroutine(self.identifier.name, self.subroutine_decl)
         return ast.FunctionCall(self.identifier, map_to_ast(program, self.args))
+
+
+class _RangeDefinition(OQPyExpression):
+    type_cls: Type[ast.RangeDefinition]
+
+    """An oqpy expression corresponding a range definition."""
+
+    def __init__(
+        self, start: AstConvertible, stop: AstConvertible = None, step: AstConvertible = 1
+    ):
+        if stop is None:
+            self.start = 0
+            self.stop = start
+        else:
+            self.start = start
+            self.stop = stop
+        self.step = step
+
+    def to_ast(self, program: Program) -> ast.RangeDefinition:
+        """Converts this oqpy range expression into an ast node."""
+        return ast.RangeDefinition(
+            to_ast(program, self.start),
+            to_ast(program, self.stop),
+            to_ast(program, self.step) if self.step != 1 else None,
+        )
