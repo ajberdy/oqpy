@@ -452,15 +452,9 @@ class RangeDefinition(OQPyExpression):
 
     """An oqpy expression corresponding a range definition."""
 
-    def __init__(
-        self, start: AstConvertible, stop: AstConvertible = None, step: AstConvertible = 1
-    ):
-        if stop is None:
-            self.start = 0
-            self.stop = start
-        else:
-            self.start = start
-            self.stop = stop
+    def __init__(self, start: AstConvertible, stop: AstConvertible, step: AstConvertible):
+        self.start = start
+        self.stop = stop
         self.step = step
 
     def to_ast(self, program: Program) -> ast.RangeDefinition:

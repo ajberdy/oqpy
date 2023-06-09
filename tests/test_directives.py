@@ -577,10 +577,6 @@ def test_for_range_definition():
     with oqpy.ForIn(prog, range_definition, "i") as index:
         prog.increment(a, index)
 
-    range_definition = RangeDefinition(5)
-    with oqpy.ForIn(prog, range_definition, "j") as index:
-        prog.increment(a, index)
-
     expected = textwrap.dedent(
         """
         OPENQASM 3.0;
@@ -589,9 +585,6 @@ def test_for_range_definition():
         int[32] a = 0;
         for int i in [start + 1:2:stop ** 2] {
             a += i;
-        }
-        for int j in [0:5] {
-            a += j;
         }
         """
     ).strip()
@@ -833,7 +826,6 @@ def test_defcals():
         prog.capture(rx_frame, constant(2.4e-6, 1))
 
     with pytest.raises(AssertionError):
-
         with defcal(prog, q2, "readout", return_type=bool):
             prog.play(tx_frame, constant(2.4e-6, 0.2))
             prog.capture(rx_frame, constant(2.4e-6, 1))
