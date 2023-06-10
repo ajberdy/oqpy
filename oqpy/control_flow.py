@@ -103,7 +103,7 @@ def ForIn(
 @contextlib.contextmanager
 def ForIn(
     program: Program,
-    iterator: Iterable[AstConvertible] | range | AstConvertible | RangeDefinition,
+    iterator: Iterable[AstConvertible] | range | AstConvertible | Range,
     identifier_name: Optional[str] = None,
     identifier_type: type[ClassicalVarT] | type[IntVar] = IntVar,
 ) -> Iterator[ClassicalVarT | IntVar]:
