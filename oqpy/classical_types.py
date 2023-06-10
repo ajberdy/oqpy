@@ -142,7 +142,16 @@ complex128 = complex_(128)
 angle32 = angle_(32)
 
 
-def convert_range(program: Program, item: Union[slice, range]) -> ast.RangeDefinition:
+class Range:
+    """Range definition class."""
+
+    def __init__(self, start: AstConvertible, stop: AstConvertible, step: AstConvertible):
+        self.start = start
+        self.stop = stop
+        self.step = step
+
+
+def convert_range(program: Program, item: Union[slice, range, Range]) -> ast.RangeDefinition:
     """Convert a slice or range into an ast node."""
     return ast.RangeDefinition(
         to_ast(program, item.start),
@@ -445,22 +454,3 @@ class OQFunctionCall(OQPyExpression):
         if self.subroutine_decl is not None:
             program._add_subroutine(self.identifier.name, self.subroutine_decl)
         return ast.FunctionCall(self.identifier, map_to_ast(program, self.args))
-
-
-class RangeDefinition(OQPyExpression):
-    type_cls: Type[ast.RangeDefinition]
-
-    """An oqpy expression corresponding a range definition."""
-
-    def __init__(self, start: AstConvertible, stop: AstConvertible, step: AstConvertible):
-        self.start = start
-        self.stop = stop
-        self.step = step
-
-    def to_ast(self, program: Program) -> ast.RangeDefinition:
-        """Converts this oqpy range expression into an ast node."""
-        return ast.RangeDefinition(
-            to_ast(program, self.start),
-            to_ast(program, self.stop),
-            to_ast(program, self.step) if self.step != 1 else None,
-        )

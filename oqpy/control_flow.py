@@ -28,7 +28,7 @@ from oqpy.classical_types import (
     DurationVar,
     IntVar,
     _ClassicalVar,
-    RangeDefinition,
+    Range,
     convert_range,
 )
 from oqpy.timing import make_duration
@@ -121,7 +121,7 @@ def ForIn(
     yield var
     state = program._pop()
 
-    if isinstance(iterator, (range, slice)):
+    if isinstance(iterator, (range, slice, Range)):
         # A range can only be iterated over integers.
         assert identifier_type is IntVar, "A range can only be looped over an integer."
         set_declaration = convert_range(program, iterator)
@@ -133,8 +133,6 @@ def ForIn(
     elif isinstance(iterator, _ClassicalVar):
         set_declaration = to_ast(program, iterator)
         assert isinstance(set_declaration, ast.Identifier), type(set_declaration)
-    elif isinstance(iterator, RangeDefinition):
-        set_declaration = iterator.to_ast(program)
     else:
         raise TypeError(f"'{type(iterator)}' object is not iterable")
 
