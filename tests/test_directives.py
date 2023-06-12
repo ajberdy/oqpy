@@ -26,7 +26,6 @@ import oqpy
 from oqpy import *
 from oqpy.base import expr_matches, logical_and, logical_or
 from oqpy.quantum_types import PhysicalQubits
-from oqpy.classical_types import Range
 from oqpy.timing import OQDurationLiteral
 
 
