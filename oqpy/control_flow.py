@@ -28,6 +28,7 @@ from oqpy.classical_types import (
     DurationVar,
     IntVar,
     _ClassicalVar,
+    Range,
     convert_range,
 )
 from oqpy.timing import make_duration
@@ -102,7 +103,7 @@ def ForIn(
 @contextlib.contextmanager
 def ForIn(
     program: Program,
-    iterator: Iterable[AstConvertible] | range | AstConvertible,
+    iterator: Iterable[AstConvertible] | range | AstConvertible | Range,
     identifier_name: Optional[str] = None,
     identifier_type: type[ClassicalVarT] | type[IntVar] = IntVar,
 ) -> Iterator[ClassicalVarT | IntVar]:
@@ -120,7 +121,7 @@ def ForIn(
     yield var
     state = program._pop()
 
-    if isinstance(iterator, (range, slice)):
+    if isinstance(iterator, (range, slice, Range)):
         # A range can only be iterated over integers.
         assert identifier_type is IntVar, "A range can only be looped over an integer."
         set_declaration = convert_range(program, iterator)

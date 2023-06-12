@@ -68,6 +68,7 @@ __all__ = [
     "bit_",
     "bit",
     "bit8",
+    "Range",
     "convert_range",
     "int_",
     "int32",
@@ -142,7 +143,16 @@ complex128 = complex_(128)
 angle32 = angle_(32)
 
 
-def convert_range(program: Program, item: Union[slice, range]) -> ast.RangeDefinition:
+class Range:
+    """Range definition class."""
+
+    def __init__(self, start: AstConvertible, stop: AstConvertible, step: AstConvertible):
+        self.start = start
+        self.stop = stop
+        self.step = step
+
+
+def convert_range(program: Program, item: Union[slice, range, Range]) -> ast.RangeDefinition:
     """Convert a slice or range into an ast node."""
     return ast.RangeDefinition(
         to_ast(program, item.start),

@@ -565,6 +565,33 @@ def test_for_in_var_types():
     assert program.to_qasm() == expected
 
 
+def test_for_Range():
+    prog = Program()
+    a = oqpy.IntVar(0, name="a")
+    prog.declare(a)
+
+    start = oqpy.IntVar(1, name="start")
+    stop = oqpy.IntVar(5, name="stop")
+    range_definition = Range(start + 1, stop**2, 2)
+    with oqpy.ForIn(prog, range_definition, "i") as index:
+        prog.increment(a, index)
+
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        int[32] start = 1;
+        int[32] stop = 5;
+        int[32] a = 0;
+        for int i in [start + 1:2:stop ** 2 - 1] {
+            a += i;
+        }
+        """
+    ).strip()
+
+    print(prog.to_qasm())
+    assert prog.to_qasm() == expected
+
+
 def test_while():
     prog = Program()
     j = IntVar(0, "j")
@@ -799,7 +826,6 @@ def test_defcals():
         prog.capture(rx_frame, constant(2.4e-6, 1))
 
     with pytest.raises(AssertionError):
-
         with defcal(prog, q2, "readout", return_type=bool):
             prog.play(tx_frame, constant(2.4e-6, 0.2))
             prog.capture(rx_frame, constant(2.4e-6, 1))
