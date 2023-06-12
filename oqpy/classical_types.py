@@ -68,6 +68,7 @@ __all__ = [
     "bit_",
     "bit",
     "bit8",
+    'Range',
     "convert_range",
     "int_",
     "int32",
