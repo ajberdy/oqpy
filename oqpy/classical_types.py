@@ -290,6 +290,11 @@ class BitVar(_SizedVar):
                 )
             else:
                 raise IndexError("list index out of range.")
+        elif isinstance(idx, IntVar):
+            return BitVar(
+                name=f"{self.name}[{idx.name}]",
+                needs_declaration=False,
+            )
         else:
             raise IndexError("The list index must be an integer.")
 
