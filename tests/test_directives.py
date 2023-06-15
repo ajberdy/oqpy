@@ -59,6 +59,7 @@ def test_variable_declaration():
     prog.declare(vars)
     prog.set(arr[1], 0)
     prog.set(arr[IntVar(2, "index")], 1)
+    prog.set(arr[IntVar(2, "index") + 1], 0)
 
     with pytest.raises(IndexError):
         prog.set(arr[40], 2)
@@ -75,6 +76,7 @@ def test_variable_declaration():
 
     expected = textwrap.dedent(
         """
+        int[32] index = 2;
         bool b = true;
         int[32] i = -4;
         uint[32] u = 5;
@@ -85,6 +87,7 @@ def test_variable_declaration():
         bit c;
         arr[1] = 0;
         arr[index] = 1;
+        arr[index + 1] = 0;
         """
     ).strip()
 

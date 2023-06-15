@@ -36,6 +36,7 @@ from openpulse import ast
 from oqpy.base import (
     AstConvertible,
     OQPyExpression,
+    OQPyBinaryExpression,
     Var,
     make_annotations,
     map_to_ast,
@@ -290,11 +291,8 @@ class BitVar(_SizedVar):
                 )
             else:
                 raise IndexError("list index out of range.")
-        elif isinstance(idx, IntVar):
-            return BitVar(
-                name=f"{self.name}[{idx.name}]",
-                needs_declaration=False,
-            )
+        elif isinstance(idx, (OQPyBinaryExpression, IntVar)):
+            return OQIndexExpression(collection=self, index=idx)
         else:
             raise IndexError("The list index must be an integer.")
 
