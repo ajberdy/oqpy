@@ -58,6 +58,9 @@ def test_variable_declaration():
     prog = Program(version=None)
     prog.declare(vars)
     prog.set(arr[1], 0)
+    index = IntVar(2, "index")
+    prog.set(arr[index], 1)
+    prog.set(arr[index + 1], 0)
 
     with pytest.raises(IndexError):
         prog.set(arr[40], 2)
@@ -74,6 +77,7 @@ def test_variable_declaration():
 
     expected = textwrap.dedent(
         """
+        int[32] index = 2;
         bool b = true;
         int[32] i = -4;
         uint[32] u = 5;
@@ -83,9 +87,12 @@ def test_variable_declaration():
         bit[20] arr;
         bit c;
         arr[1] = 0;
+        arr[index] = 1;
+        arr[index + 1] = 0;
         """
     ).strip()
 
+    print(prog.to_qasm())
     assert isinstance(arr[14], BitVar)
     assert prog.to_qasm() == expected
 
