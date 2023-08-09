@@ -1735,3 +1735,15 @@ def test_ramsey_example_blog():
     ).strip()
 
     assert full_prog.to_qasm(encal_declarations=True) == expected
+
+
+def test_subroutine_type_hints():
+    @subroutine
+    def test(prog: Program, x) -> IntVar:
+        return x
+
+    prog = Program()
+    y = IntVar(2, "y")
+
+    with pytest.raises(ValueError):
+        prog.set(y, test(prog, 3))

@@ -75,12 +75,13 @@ def subroutine(
     ) -> OQFunctionCall:
         name = func.__name__
         identifier = ast.Identifier(func.__name__)
-        argnames = list(inspect.signature(func).parameters.keys())
+        parameters = inspect.signature(func).parameters
+        argnames = list(parameters.keys())
         type_hints = get_type_hints(func)
         inputs = {}  # used as inputs when calling the actual python function
         arguments = []  # used in the ast definition of the subroutine
         for argname in argnames[1:]:  # arg 0 should be program
-            if argname not in type_hints:
+            if argname not in type_hints or type_hints[argname] is parameters[argname].empty:
                 raise ValueError(f"No type hint provided for {argname} on subroutine {name}.")
             input_ = inputs[argname] = type_hints[argname](name=argname)
 
