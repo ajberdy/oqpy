@@ -25,6 +25,7 @@ from typing import (
     Any,
     Callable,
     Iterable,
+    Optional,
     Sequence,
     Type,
     TypeVar,
@@ -42,9 +43,11 @@ from oqpy.base import (
     optional_ast,
     to_ast,
 )
-from oqpy.timing import make_duration
+from oqpy.timing import convert_float_to_duration
 
 if TYPE_CHECKING:
+    from typing import Literal
+
     from oqpy.program import Program
 
 __all__ = [
@@ -68,7 +71,6 @@ __all__ = [
     "bit_",
     "bit",
     "bit8",
-    "Range",
     "convert_range",
     "int_",
     "int32",
@@ -143,16 +145,7 @@ complex128 = complex_(128)
 angle32 = angle_(32)
 
 
-class Range:
-    """Range definition class."""
-
-    def __init__(self, start: AstConvertible, stop: AstConvertible, step: AstConvertible):
-        self.start = start
-        self.stop = stop
-        self.step = step
-
-
-def convert_range(program: Program, item: Union[slice, range, Range]) -> ast.RangeDefinition:
+def convert_range(program: Program, item: Union[slice, range]) -> ast.RangeDefinition:
     """Convert a slice or range into an ast node."""
     return ast.RangeDefinition(
         to_ast(program, item.start),
@@ -166,15 +159,15 @@ class Identifier(OQPyExpression):
 
     name: str
 
-    def __init__(self, name: str) -> None:
-        self.type = None
+    def __init__(self, name: str, ast_type: ast.ClassicalType) -> None:
         self.name = name
+        self.type = ast_type
 
     def to_ast(self, program: Program) -> ast.Expression:
         return ast.Identifier(name=self.name)
 
 
-pi = Identifier(name="pi")
+pi = Identifier(name="pi", ast_type=ast.FloatType())
 
 
 class _ClassicalVar(Var, OQPyExpression):
@@ -187,7 +180,7 @@ class _ClassicalVar(Var, OQPyExpression):
 
     def __init__(
         self,
-        init_expression: AstConvertible | None = None,
+        init_expression: AstConvertible | Literal["input", "output"] | None = None,
         name: str | None = None,
         needs_declaration: bool = True,
         annotations: Sequence[str | tuple[str, str]] = (),
@@ -206,6 +199,10 @@ class _ClassicalVar(Var, OQPyExpression):
 
     def make_declaration_statement(self, program: Program) -> ast.Statement:
         """Make an ast statement that declares the OQpy variable."""
+        if isinstance(self.init_expression, str) and self.init_expression in ("input", "output"):
+            return ast.IODeclaration(
+                ast.IOKeyword[self.init_expression], self.type, self.to_ast(program)
+            )
         init_expression_ast = optional_ast(program, self.init_expression)
         stmt = ast.ClassicalDeclaration(self.type, self.to_ast(program), init_expression_ast)
         stmt.annotations = make_annotations(self.annotations)
@@ -307,7 +304,7 @@ class ComplexVar(_ClassicalVar):
 
     def __init__(
         self,
-        init_expression: AstConvertible | None = None,
+        init_expression: AstConvertible | Literal["input", "output"] | None = None,
         *args: Any,
         base_type: ast.FloatType = float64,
         **kwargs: Any,
@@ -315,7 +312,7 @@ class ComplexVar(_ClassicalVar):
         assert isinstance(base_type, ast.FloatType)
         self.base_type = base_type
 
-        if not isinstance(init_expression, (complex, type(None), OQPyExpression)):
+        if not isinstance(init_expression, (complex, type(None), str, OQPyExpression)):
             init_expression = complex(init_expression)  # type: ignore[arg-type]
         super().__init__(init_expression, *args, **kwargs, base_type=base_type)
 
@@ -327,13 +324,13 @@ class DurationVar(_ClassicalVar):
 
     def __init__(
         self,
-        init_expression: AstConvertible | None = None,
+        init_expression: AstConvertible | Literal["input", "output"] | None = None,
         name: str | None = None,
         *args: Any,
         **type_kwargs: Any,
     ) -> None:
-        if init_expression is not None:
-            init_expression = make_duration(init_expression)
+        if init_expression is not None and not isinstance(init_expression, str):
+            init_expression = convert_float_to_duration(init_expression)
         super().__init__(init_expression, name, *args, **type_kwargs)
 
 
@@ -386,8 +383,10 @@ class ArrayVar(_ClassicalVar):
             array_base_type = base_type_instance.type_cls()
 
         # Automatically handle Duration array.
-        if base_type is DurationVar and kwargs["init_expression"]:
-            kwargs["init_expression"] = (make_duration(i) for i in kwargs["init_expression"])
+        if base_type is DurationVar and kwargs["init_expression"] is not None:
+            kwargs["init_expression"] = (
+                convert_float_to_duration(i) for i in kwargs["init_expression"]
+            )
 
         super().__init__(
             *args,
@@ -424,7 +423,7 @@ class OQFunctionCall(OQPyExpression):
         self,
         identifier: Union[str, ast.Identifier],
         args: Iterable[AstConvertible],
-        return_type: ast.ClassicalType,
+        return_type: Optional[ast.ClassicalType],
         extern_decl: ast.ExternDeclaration | None = None,
         subroutine_decl: ast.SubroutineDefinition | None = None,
     ):
@@ -433,7 +432,7 @@ class OQFunctionCall(OQPyExpression):
         Args:
             identifier: The function name.
             args: The function arguments.
-            return_type: The type returned by the function call.
+            return_type: The type returned by the function call. If none, returns nothing.
             extern_decl: An optional extern declaration ast node. If present,
                 this extern declaration will be added to the top of the program
                 whenever this is converted to ast.

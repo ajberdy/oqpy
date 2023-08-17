@@ -18,20 +18,19 @@
 from __future__ import annotations
 
 import contextlib
-from typing import TYPE_CHECKING, Iterator, Optional, Sequence, Union, Iterable
+from typing import TYPE_CHECKING, Iterator, Optional, Sequence, Union
 
 from openpulse import ast
 from openpulse.printer import dumps
 
-import oqpy.classical_types
 from oqpy.base import AstConvertible, Var, make_annotations, to_ast
-from oqpy.classical_types import _ClassicalVar
+from oqpy.classical_types import AngleVar, _ClassicalVar
 
 if TYPE_CHECKING:
     from oqpy.program import Program
 
 
-__all__ = ["Qubit", "QubitArray", "defcal", "PhysicalQubits", "Cal"]
+__all__ = ["Qubit", "QubitArray", "defcal", "gate", "PhysicalQubits", "Cal"]
 
 
 class Qubit(Var):
@@ -72,6 +71,7 @@ class PhysicalQubits:
 # Todo (#51): support QubitArray
 class QubitArray(Var):
     """Represents an array of qubits."""
+
     def __init__(self, name: str, size: int, needs_declaration: bool = True):
         super().__init__(name, needs_declaration=needs_declaration)
         self.name = name
@@ -84,17 +84,62 @@ class QubitArray(Var):
 
     def make_declaration_statement(self, program: Program) -> ast.Statement:
         """Make an ast statement that declares the OQpy variable."""
-        return ast.QubitDeclaration(
-            ast.Identifier(self.name),
-            size=ast.IntegerLiteral(self.size)
-        )
+        return ast.QubitDeclaration(ast.Identifier(self.name), size=ast.IntegerLiteral(self.size))
 
     def get_item(self, program, idx):
         # todo: slices and stuff
         index = to_ast(program, idx)
-        return ast.IndexExpression(
-            ast.Identifier(self.name), [index]
-        )
+        return ast.IndexExpression(ast.Identifier(self.name), [index])
+
+
+@contextlib.contextmanager
+def gate(
+    program: Program,
+    qubits: Union[Qubit, list[Qubit]],
+    name: str,
+    arguments: Optional[list[AstConvertible]] = None,
+    declare_here: bool = False,
+) -> Union[Iterator[None], Iterator[list[AngleVar]], Iterator[AngleVar]]:
+    """Context manager for creating a gate.
+
+    .. code-block:: python
+
+        with gate(program, q1, "HRzH", [AngleVar(name="theta")]) as theta:
+            program.gate(q1, "H")
+            program.gate(q1, "Rz", theta)
+            program.gate(q1, "H")
+    """
+    if isinstance(qubits, Qubit):
+        qubits = [qubits]
+
+    arguments_ast = []
+    variables = []
+    if arguments is not None:
+        for arg in arguments:
+            if not isinstance(arg, AngleVar):
+                raise ValueError(arg, "Gates only support args of type AngleVar.")
+            arguments_ast.append(ast.Identifier(name=arg.name))
+            arg._needs_declaration = False
+            variables.append(arg)
+
+    program._push()
+    if len(variables) > 1:
+        yield variables
+    elif len(variables) == 1:
+        yield variables[0]
+    else:
+        yield None
+    state = program._pop()
+
+    stmt = ast.QuantumGateDefinition(
+        name=ast.Identifier(name),
+        arguments=arguments_ast,
+        qubits=[ast.Identifier(q.name) for q in qubits],
+        body=state.body,
+    )
+    if declare_here:
+        program._add_statement(stmt)
+    program._add_gate(name, stmt, needs_declaration=not declare_here)
 
 
 @contextlib.contextmanager
@@ -135,7 +180,7 @@ def defcal(
     elif len(variables) == 1:
         yield variables[0]
     else:
-        yield
+        yield None
     state = program._pop()
 
     stmt = ast.CalibrationDefinition(
