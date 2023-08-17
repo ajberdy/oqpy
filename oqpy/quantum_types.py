@@ -71,6 +71,7 @@ class PhysicalQubits:
 # Todo (#51): support QubitArray
 class QubitArray(Var):
     """Represents an array of qubits."""
+
     def __init__(self, name: str, size: int, needs_declaration: bool = True):
         super().__init__(name, needs_declaration=needs_declaration)
         self.name = name
@@ -83,17 +84,12 @@ class QubitArray(Var):
 
     def make_declaration_statement(self, program: Program) -> ast.Statement:
         """Make an ast statement that declares the OQpy variable."""
-        return ast.QubitDeclaration(
-            ast.Identifier(self.name),
-            size=ast.IntegerLiteral(self.size)
-        )
+        return ast.QubitDeclaration(ast.Identifier(self.name), size=ast.IntegerLiteral(self.size))
 
     def get_item(self, program, idx):
         # todo: slices and stuff
         index = to_ast(program, idx)
-        return ast.IndexExpression(
-            ast.Identifier(self.name), [index]
-        )
+        return ast.IndexExpression(ast.Identifier(self.name), [index])
 
 
 @contextlib.contextmanager

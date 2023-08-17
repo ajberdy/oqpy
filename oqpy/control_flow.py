@@ -27,8 +27,8 @@ from oqpy.classical_types import (
     AstConvertible,
     DurationVar,
     IntVar,
-    _ClassicalVar,
     Range,
+    _ClassicalVar,
     convert_range,
 )
 from oqpy.timing import convert_float_to_duration
