@@ -146,16 +146,7 @@ complex128 = complex_(128)
 angle32 = angle_(32)
 
 
-class Range:
-    """Range definition class."""
-
-    def __init__(self, start: AstConvertible, stop: AstConvertible, step: AstConvertible):
-        self.start = start
-        self.stop = stop
-        self.step = step
-
-
-def convert_range(program: Program, item: Union[slice, range, Range]) -> ast.RangeDefinition:
+def convert_range(program: Program, item: Union[slice, range]) -> ast.RangeDefinition:
     """Convert a slice or range into an ast node."""
     return ast.RangeDefinition(
         to_ast(program, item.start),

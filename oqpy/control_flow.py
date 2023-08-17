@@ -27,7 +27,6 @@ from oqpy.classical_types import (
     AstConvertible,
     DurationVar,
     IntVar,
-    Range,
     _ClassicalVar,
     convert_range,
 )
@@ -121,7 +120,7 @@ def ForIn(
     yield var
     state = program._pop()
 
-    if isinstance(iterator, (range, slice, Range)):
+    if isinstance(iterator, (range, slice)):
         # A range can only be iterated over integers.
         assert identifier_type is IntVar, "A range can only be looped over an integer."
         set_declaration = convert_range(program, iterator)

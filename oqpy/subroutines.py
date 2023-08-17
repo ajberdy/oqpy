@@ -162,9 +162,6 @@ def subroutine(
     return wrapper
 
 
-FnType = TypeVar("FnType", bound=Callable[..., Any])
-
-
 def annotate_subroutine(keyword: str, command: str | None = None) -> Callable[[FnType], FnType]:
     """Add annotation to a subroutine."""
 
