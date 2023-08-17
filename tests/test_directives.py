@@ -15,18 +15,85 @@
 ############################################################################
 
 import copy
+import math
+import sys
 import textwrap
-from dataclasses import dataclass
+import types
+import typing
+from dataclasses import dataclass, fields
 
 import numpy as np
 import pytest
+from openpulse import ast
+from openpulse.parser import QASMVisitor
 from openpulse.printer import dumps
 
 import oqpy
 from oqpy import *
-from oqpy.base import expr_matches, logical_and, logical_or
+from oqpy.base import OQPyExpression, expr_matches, logical_and, logical_or
 from oqpy.quantum_types import PhysicalQubits
 from oqpy.timing import OQDurationLiteral
+
+
+def _type_matches(val, type_hint) -> bool:
+    """Return true if the value could be an element of type_hint.
+
+    This is more general than `isinstance` since it handles annotated and union types.
+    """
+    origin = typing.get_origin(type_hint)
+    if origin is None:
+        # Make an exception for int where float is requested.
+        return isinstance(val, type_hint) or (isinstance(val, int) and issubclass(type_hint, float))
+    args = typing.get_args(type_hint)
+
+    union_types = [typing.Union]
+    if sys.version_info >= (3, 10):
+        union_types.append(types.UnionType)  # 3.9 has no types.UnionType
+
+    if origin in union_types:
+        for arg in args:
+            if _type_matches(val, arg):
+                return True
+        return False
+
+    if origin is typing.Annotated:
+        return _type_matches(val, args[0])
+
+    if origin is list:
+        return isinstance(val, origin) and all(_type_matches(item, args[0]) for item in val)
+
+    if origin is dict:
+        return (
+            isinstance(val, origin)
+            and all(_type_matches(k, args[0]) for k in val.keys())
+            and all(_type_matches(v, args[1]) for v in val.values())
+        )
+
+    return isinstance(val, origin)
+
+
+class AstTypeHintChecker(QASMVisitor):
+    def __init__(self, except_fields):
+        self.except_fields = except_fields
+
+    def generic_visit(self, node, context=None):
+        cls = type(node)
+        type_hints = typing.get_type_hints(cls)
+        for field in fields(cls):
+            val = getattr(node, field.name)
+            type_hint = type_hints[field.name]
+            if not _type_matches(val, type_hint) and field.name not in self.except_fields:
+                raise TypeError(
+                    f"node of type {type(node).__name__} has type mismatch on field {field.name}\n"
+                    f"Got {val} of type {type(val)} but expected something of type {type_hint}"
+                )
+        super().generic_visit(node, context)
+
+
+def _check_respects_type_hints(prog, except_fields=()):
+    if sys.version_info < (3, 9):
+        return  # typing module interface is too different before 3.9
+    AstTypeHintChecker(except_fields).visit(prog.to_ast())
 
 
 def test_version_string():
@@ -42,6 +109,7 @@ def test_version_string():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_variable_declaration():
@@ -95,6 +163,7 @@ def test_variable_declaration():
     print(prog.to_qasm())
     assert isinstance(arr[14], BitVar)
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_complex_numbers_declaration():
@@ -144,6 +213,8 @@ def test_complex_numbers_declaration():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
+
 
 
 def test_array_declaration():
@@ -169,20 +240,30 @@ def test_array_declaration():
     multidim = ArrayVar[FloatVar[32], 3, 2](
         name="multiDim", init_expression=[[1.1, 1.2], [2.1, 2.2], [3.1, 3.2]]
     )
+    npinit = ArrayVar(
+        name="npinit",
+        init_expression=np.array([0, 1, 2, 4]) * 1e-9,
+        dimensions=[11],
+        base_type=DurationVar,
+    )
 
-    vars = [b, i, i55, u, x, y, ang, comp, comp55, ang_partial, simple, multidim]
+    vars = [b, i, i55, u, x, y, ang, comp, comp55, ang_partial, simple, multidim, npinit]
 
     prog = oqpy.Program(version=None)
     prog.declare(vars)
     prog.set(i[1], 0)  # Set with literal values
     idx = IntVar(name="idx", init_expression=5)
     val = IntVar(name="val", init_expression=10)
+    d = DurationVar(name="d", init_expression=0)
     prog.set(i[idx], val)
+    prog.set(npinit[5], d - 2e-9)
+    prog.set(npinit[0], 2 * npinit[0] + 2e-9)
 
     expected = textwrap.dedent(
         """
         int[32] idx = 5;
         int[32] val = 10;
+        duration d = 0.0ns;
         array[bool, 2] b = {true, false};
         array[int[32], 5] i = {0, 1, 2, 3, 4};
         array[int[55], 5] i55 = {0, 1, 2, 3, 4};
@@ -195,12 +276,17 @@ def test_array_declaration():
         array[angle[32], 2] ang_part = {pi, pi / 2};
         array[float[64], 5] no_init;
         array[float[32], 3, 2] multiDim = {{1.1, 1.2}, {2.1, 2.2}, {3.1, 3.2}};
+        array[duration, 11] npinit = {0.0ns, 1.0ns, 2.0ns, 4.0ns};
         i[1] = 0;
         i[idx] = val;
+        npinit[5] = d - 2.0ns;
+        npinit[0] = 2 * npinit[0] + 2.0ns;
         """
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
+
 
 
 def test_non_trivial_array_access():
@@ -226,9 +312,9 @@ def test_non_trivial_array_access():
         """
         OPENQASM 3.0;
         port my_port;
-        array[duration, 5] duration_array = {0.0ns, 250000000.0ns, 500000000.0ns, 750000000.0ns, 1000000000.0ns};
+        array[duration, 5] duration_array = {0.0ns, 250.0ms, 500.0ms, 750.0ms, 1s};
         int[32] one = 1;
-        duration one_second = 1000000000.0ns;
+        duration one_second = 1s;
         frame my_frame = newframe(my_port, 1000000000.0, 0);
         for int idx in [0:3] {
             delay[duration_array[idx + one] + one_second] my_frame;
@@ -238,6 +324,8 @@ def test_non_trivial_array_access():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
+
 
 
 def test_non_trivial_variable_declaration():
@@ -258,6 +346,7 @@ def test_non_trivial_variable_declaration():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_variable_assignment():
@@ -283,6 +372,7 @@ def test_variable_assignment():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_binary_expressions():
@@ -290,9 +380,11 @@ def test_binary_expressions():
     i = IntVar(5, "i")
     j = IntVar(2, "j")
     k = IntVar(0, "k")
+    f = FloatVar(0.0, "f")
     b1 = BoolVar(False, "b1")
     b2 = BoolVar(True, "b2")
     b3 = BoolVar(False, "b3")
+    d = DurationVar(5e-9, "d")
     prog.set(i, 2 * (i + j))
     prog.set(j, 2 % (2 - i) % 2)
     prog.set(j, 1 + oqpy.pi)
@@ -317,6 +409,11 @@ def test_binary_expressions():
     prog.set(b1, logical_or(b2, b3))
     prog.set(b1, logical_and(b2, True))
     prog.set(b1, logical_or(False, b3))
+    prog.set(d, d / 5)
+    prog.set(d, d + 5e-9)
+    prog.set(d, 5e-9 - d)
+    prog.set(d, d + convert_float_to_duration(10e-9))
+    prog.set(f, d / convert_float_to_duration(1))
 
     expected = textwrap.dedent(
         """
@@ -327,6 +424,8 @@ def test_binary_expressions():
         bool b1 = false;
         bool b2 = true;
         bool b3 = false;
+        duration d = 5.0ns;
+        float[64] f = 0.0;
         i = 2 * (i + j);
         j = 2 % (2 - i) % 2;
         j = 1 + pi;
@@ -351,10 +450,50 @@ def test_binary_expressions():
         b1 = b2 || b3;
         b1 = b2 && true;
         b1 = false || b3;
+        d = d / 5;
+        d = d + 5.0ns;
+        d = 5.0ns - d;
+        d = d + 10.0ns;
+        f = d / 1s;
         """
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
+
+
+@pytest.mark.xfail
+def test_add_incomptible_type():
+    # This test should fail since we add float to a duration and then don't type cast things
+    # properly. This test should be fixed once we land this support.
+    prog = oqpy.Program()
+    port = oqpy.PortVar(name="my_port")
+    frame = oqpy.FrameVar(name="my_frame", port=port, frequency=5e9, phase=0)
+    delay = oqpy.DurationVar(10e-9, name="d")
+    f = oqpy.FloatVar(5e-9, "f")
+
+    prog.delay(delay + f, frame)
+
+    # Note the automatic conversion of float to duration. Do note that OpenQASM spec does not allows
+    # `float * duration` but does allow for `const float * duration`. So this example is not
+    # entirely spec-compliant. Though arguably the spec should be changed.
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        defcalgrammar "openpulse";
+        cal {
+            port my_port;
+            frame my_frame = newframe(my_port, 5000000000.0, 0);
+        }
+        duration d = 10.0ns;
+        float[64] f = 5e-09;
+
+        delay[d + f * 1s] my_frame;
+        """
+    ).strip()
+
+    assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_measure_reset_pragma():
@@ -387,6 +526,8 @@ def test_measure_reset_pragma():
     ).strip()
 
     assert prog.to_qasm() == expected
+    # Todo: Pragmas aren't currently statements
+    _check_respects_type_hints(prog, ["statements"])
 
 
 def test_bare_if():
@@ -414,6 +555,7 @@ def test_bare_if():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_if_else():
@@ -450,6 +592,7 @@ def test_if_else():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_for_in():
@@ -486,6 +629,7 @@ def test_for_in():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_for_in_var_types():
@@ -510,6 +654,7 @@ def test_for_in_var_types():
     ).strip()
 
     assert program.to_qasm() == expected
+    _check_respects_type_hints(program)
 
     # Test over duration array.
     program = oqpy.Program()
@@ -523,7 +668,7 @@ def test_for_in_var_types():
         OPENQASM 3.0;
         port my_port;
         frame my_frame = newframe(my_port, 3000000000.0, 0);
-        for duration d in {1.0ns, 2.0ns, 5.0ns, 10.0ns, 1000.0ns} {
+        for duration d in {1.0ns, 2.0ns, 5.0ns, 10.0ns, 1.0us} {
             delay[d] my_frame;
         }
         """
@@ -546,6 +691,8 @@ def test_for_in_var_types():
         }
         """
     ).strip()
+    assert program.to_qasm() == expected
+    _check_respects_type_hints(program)
 
     # Test indexing over an ArrayVar
     program = oqpy.Program()
@@ -570,6 +717,7 @@ def test_for_in_var_types():
     ).strip()
 
     assert program.to_qasm() == expected
+    _check_respects_type_hints(program)
 
 
 def test_for_Range():
@@ -621,6 +769,7 @@ def test_while():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_create_frame():
@@ -643,6 +792,7 @@ def test_create_frame():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_subroutine_with_return():
@@ -659,6 +809,8 @@ def test_subroutine_with_return():
     def declare(prog: Program, x: IntVar):
         prog.declare([x])
 
+    # This won't define a subroutine because it was not called with do_expression.
+    # The call is NOT added to the program neither
     declare(prog, y)
 
     @subroutine
@@ -708,6 +860,43 @@ def test_subroutine_with_return():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
+
+
+def test_subroutine_order():
+    prog = Program()
+
+    @subroutine
+    def delay50ns(prog: Program, q: Qubit) -> None:
+        prog.delay(50e-9, q)
+
+    @subroutine
+    def multiply(prog: Program, x: IntVar, y: IntVar) -> IntVar:
+        return x * y
+
+    y = IntVar(2, "y")
+    prog.declare([delay50ns, multiply, y])
+    prog.set(y, multiply(prog, y, 3))
+    q = PhysicalQubits[0]
+    prog.do_expression(delay50ns(prog, q))
+
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        def delay50ns(qubit q) {
+            delay[50.0ns] q;
+        }
+        def multiply(int[32] x, int[32] y) -> int[32] {
+            return x * y;
+        }
+        int[32] y = 2;
+        y = multiply(y, 3);
+        delay50ns($0);
+        """
+    ).strip()
+
+    assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_box_and_timings():
@@ -726,7 +915,7 @@ def test_box_and_timings():
 
     with pytest.raises(TypeError):
         f = FloatVar(200e-9, "f", needs_declaration=False)
-        make_duration(f.to_ast(prog))
+        convert_float_to_duration(f.to_ast(prog))
 
     expected = textwrap.dedent(
         """
@@ -736,7 +925,7 @@ def test_box_and_timings():
         frame framename = newframe(portname, 1000000000.0, 0);
         box[500.0ns] {
             play(framename, constant(100.0ns, 0.5));
-            delay[20000.0ns] framename;
+            delay[20.0us] framename;
             play(framename, constant(100.0ns, 0.5));
         }
         box {
@@ -746,6 +935,8 @@ def test_box_and_timings():
     ).strip()
 
     assert prog.to_qasm() == expected
+    # Todo: box only currently technically allows QuantumStatements (i.e. gates)
+    _check_respects_type_hints(prog, ["body"])
 
 
 def test_play_capture():
@@ -764,13 +955,14 @@ def test_play_capture():
         extern constant(duration, complex[float[64]]) -> waveform;
         port portname;
         frame framename = newframe(portname, 1000000000.0, 0);
-        waveform kernel = constant(1000.0ns, 1);
-        play(framename, constant(1000.0ns, 0.5));
+        waveform kernel = constant(1.0us, 1);
+        play(framename, constant(1.0us, 0.5));
         capture(framename, kernel);
         """
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_set_shift_frequency():
@@ -792,6 +984,55 @@ def test_set_shift_frequency():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
+
+
+def test_declare_extern():
+    program = Program()
+
+    # Test an extern with one input and output
+    sqrt = declare_extern("sqrt", [("x", float32)], float32)
+
+    # Test an extern with two inputs and one output
+    arctan = declare_extern("arctan", [("x", float32), ("y", float32)], float32)
+
+    # Test an extern with no input and one output
+    time = declare_extern("time", [], int32)
+
+    # Test an extern with one input and no output
+    set_global_voltage = declare_extern("set_voltage", [("voltage", int32)])
+
+    # Test an extern with no input and no output
+    fire_bazooka = declare_extern("fire_bazooka", [])
+
+    f = oqpy.FloatVar(name="f", init_expression=0.0)
+    i = oqpy.IntVar(name="i", init_expression=5)
+
+    program.set(f, sqrt(f))
+    program.set(f, arctan(f, f))
+    program.set(i, time())
+    program.do_expression(set_global_voltage(i))
+    program.do_expression(fire_bazooka())
+
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        extern sqrt(float[32]) -> float[32];
+        extern arctan(float[32], float[32]) -> float[32];
+        extern time() -> int[32];
+        extern set_voltage(int[32]);
+        extern fire_bazooka();
+        float[64] f = 0.0;
+        int[32] i = 5;
+        f = sqrt(f);
+        f = arctan(f, f);
+        i = time();
+        set_voltage(i);
+        fire_bazooka();
+        """
+    ).strip()
+
+    assert program.to_qasm() == expected
 
 
 def test_defcals():
@@ -848,37 +1089,38 @@ def test_defcals():
         frame tx_frame = newframe(tx_port, 5752000000.0, 0);
         frame rx_frame = newframe(rx_port, 5752000000.0, 0);
         defcal x $2 {
-            play(q_frame, constant(1000.0ns, 0.1));
+            play(q_frame, constant(1.0us, 0.1));
         }
         defcal rx(angle[32] theta) $2 {
             theta += 0.1;
-            play(q_frame, constant(1000.0ns, 0.1));
+            play(q_frame, constant(1.0us, 0.1));
         }
         defcal rx(pi / 3) $2 {
-            play(q_frame, constant(1000.0ns, 0.1));
+            play(q_frame, constant(1.0us, 0.1));
         }
         defcal xy(angle[32] theta, pi / 2) $1, $2 {
             theta += 0.1;
-            play(q_frame, constant(1000.0ns, 0.1));
+            play(q_frame, constant(1.0us, 0.1));
         }
         defcal xy(angle[32] theta, float[64] phi, 10) $1, $2 {
             theta += 0.1;
             phi += 0.2;
-            play(q_frame, constant(1000.0ns, 0.1));
+            play(q_frame, constant(1.0us, 0.1));
         }
         defcal readout $2 -> bit {
-            play(tx_frame, constant(2400.0ns, 0.2));
-            capture(rx_frame, constant(2400.0ns, 1));
+            play(tx_frame, constant(2.4us, 0.2));
+            capture(rx_frame, constant(2.4us, 1));
         }
         """
     ).strip()
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
     expect_defcal_rx_theta = textwrap.dedent(
         """
         defcal rx(angle[32] theta) $2 {
             theta += 0.1;
-            play(q_frame, constant(1000.0ns, 0.1));
+            play(q_frame, constant(1.0us, 0.1));
         }
         """
     ).strip()
@@ -889,7 +1131,7 @@ def test_defcals():
     expect_defcal_rx_pio2 = textwrap.dedent(
         """
         defcal rx(pi / 3) $2 {
-            play(q_frame, constant(1000.0ns, 0.1));
+            play(q_frame, constant(1.0us, 0.1));
         }
         """
     ).strip()
@@ -901,7 +1143,7 @@ def test_defcals():
         """
         defcal xy(angle[32] theta, pi / 2) $1, $2 {
             theta += 0.1;
-            play(q_frame, constant(1000.0ns, 0.1));
+            play(q_frame, constant(1.0us, 0.1));
         }
         """
     ).strip()
@@ -916,7 +1158,7 @@ def test_defcals():
         defcal xy(angle[32] theta, float[64] phi, 10) $1, $2 {
             theta += 0.1;
             phi += 0.2;
-            play(q_frame, constant(1000.0ns, 0.1));
+            play(q_frame, constant(1.0us, 0.1));
         }
         """
     ).strip()
@@ -930,8 +1172,8 @@ def test_defcals():
     expect_defcal_readout_q2 = textwrap.dedent(
         """
         defcal readout $2 -> bit {
-            play(tx_frame, constant(2400.0ns, 0.2));
-            capture(rx_frame, constant(2400.0ns, 1));
+            play(tx_frame, constant(2.4us, 0.2));
+            capture(rx_frame, constant(2.4us, 1));
         }
         """
     ).strip()
@@ -984,22 +1226,22 @@ def test_returns():
         frame tx_frame = newframe(tx_port, 5752000000.0, 0);
         frame rx_frame = newframe(rx_port, 5752000000.0, 0);
         defcal measure_v1 $0 -> bit {
-            play(tx_frame, constant(2400.0ns, 0.2));
-            return capture_v2(rx_frame, 2400.0ns);
+            play(tx_frame, constant(2.4us, 0.2));
+            return capture_v2(rx_frame, 2.4us);
         }
         int[32] j = 0;
         int[32] k = 0;
         k = increment_variable_return(j);
         """
     ).strip()
-    print(prog.to_qasm())
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
     expected_defcal_measure_v1_q0 = textwrap.dedent(
         """
         defcal measure_v1 $0 -> bit {
-            play(tx_frame, constant(2400.0ns, 0.2));
-            return capture_v2(rx_frame, 2400.0ns);
+            play(tx_frame, constant(2.4us, 0.2));
+            return capture_v2(rx_frame, 2.4us);
         }
         """
     ).strip()
@@ -1091,18 +1333,18 @@ def test_ramsey_example():
             frame tx_frame = newframe(tx_port, 5752000000.0, 0);
         }
         defcal readout $2 {
-            play(tx_frame, constant(2400.0ns, 0.2));
-            capture(rx_frame, constant(2400.0ns, 1));
+            play(tx_frame, constant(2.4us, 0.2));
+            capture(rx_frame, constant(2.4us, 1));
         }
         defcal x90 $2 {
             play(q_frame, gaussian(32.0ns, 8.0ns, 0.2063, 0.0));
         }
         cal {
             for int shot in [0:1000] {
-                duration ramsey_delay = 12000.0ns;
+                duration ramsey_delay = 12.0us;
                 angle[32] tppi_angle = 0;
                 for int delay_increment in [0:80] {
-                    delay[100000.0ns];
+                    delay[100.0us];
                     set_phase(q_frame, 0);
                     set_phase(rx_frame, 0);
                     set_phase(tx_frame, 0);
@@ -1130,13 +1372,14 @@ def test_ramsey_example():
     expect_defcal_readout_q2 = textwrap.dedent(
         """
         defcal readout $2 {
-            play(tx_frame, constant(2400.0ns, 0.2));
-            capture(rx_frame, constant(2400.0ns, 1));
+            play(tx_frame, constant(2.4us, 0.2));
+            capture(rx_frame, constant(2.4us, 1));
         }
         """
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
     assert dumps(prog.defcals[(("$2",), "x90", ())], indent="    ").strip() == expect_defcal_x90_q2
     assert (
         dumps(prog.defcals[(("$2",), "readout", ())], indent="    ").strip()
@@ -1188,12 +1431,12 @@ def test_rabi_example():
             frame q0_readout_tx_frame = newframe(zcu216_dac230_0, 3571600000, 0);
             frame q0_readout_rx_frame = newframe(zcu216_adc225_0, 3571600000, 0);
             waveform rabi_pulse_wf = gaussian(52.0ns, 13.0ns, 1.0, 0.0);
-            waveform readout_waveform_wf = constant(1600.0ns, 0.02);
-            waveform readout_kernel_wf = constant(1600.0ns, 1);
+            waveform readout_waveform_wf = constant(1.6us, 0.02);
+            waveform readout_kernel_wf = constant(1.6us, 1);
             for int shot in [1:1000] {
                 set_scale(q0_transmon_xy_frame, -0.2);
                 for int amplitude in [1:101] {
-                    delay[200000.0ns] q0_transmon_xy_frame, q0_readout_tx_frame, q0_readout_rx_frame;
+                    delay[200.0us] q0_transmon_xy_frame, q0_readout_tx_frame, q0_readout_rx_frame;
                     set_phase(q0_transmon_xy_frame, 0);
                     set_phase(q0_readout_tx_frame, 0);
                     set_phase(q0_readout_rx_frame, 0);
@@ -1210,6 +1453,7 @@ def test_rabi_example():
     ).strip()
 
     assert prog.to_qasm(encal=True, include_externs=False) == expected
+    _check_respects_type_hints(prog)
 
 
 def test_program_add():
@@ -1240,7 +1484,7 @@ def test_program_add():
         port p1;
         frame f1 = newframe(p1, 5000000000.0, 0);
         waveform wf = constant(100.0ns, 0.5);
-        delay[1000.0ns];
+        delay[1.0us];
         defcal x180 $1 {
             play(f1, wf);
         }
@@ -1254,6 +1498,7 @@ def test_program_add():
 
     prog = prog1 + prog2
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
     with pytest.raises(RuntimeError):
         with If(prog2, i == 0):
@@ -1300,6 +1545,7 @@ def test_expression_convertible():
         """
     ).strip()
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_waveform_extern_arg_passing():
@@ -1332,6 +1578,7 @@ def test_waveform_extern_arg_passing():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_needs_declaration():
@@ -1367,7 +1614,59 @@ def test_needs_declaration():
         """
     ).strip()
 
+    declared_vars = {}
+    undeclared_vars = ["i1", "i2", "f1", "f2", "q1", "q2"]
+    statement_ast = [
+        ast.ClassicalAssignment(
+            lvalue=ast.Identifier(name="i1"),
+            op=ast.AssignmentOperator["+="],
+            rvalue=ast.IntegerLiteral(value=1),
+        ),
+        ast.ClassicalAssignment(
+            lvalue=ast.Identifier(name="i2"),
+            op=ast.AssignmentOperator["+="],
+            rvalue=ast.IntegerLiteral(value=1),
+        ),
+        ast.ExpressionStatement(
+            expression=ast.FunctionCall(
+                name=ast.Identifier(name="set_phase"),
+                arguments=[ast.Identifier(name="f1"), ast.IntegerLiteral(value=0)],
+            )
+        ),
+        ast.ExpressionStatement(
+            expression=ast.FunctionCall(
+                name=ast.Identifier(name="set_phase"),
+                arguments=[ast.Identifier(name="f2"), ast.IntegerLiteral(value=0)],
+            )
+        ),
+        ast.QuantumGate(
+            modifiers=[],
+            name=ast.Identifier(name="X"),
+            arguments=[],
+            qubits=[ast.Identifier(name="q1")],
+            duration=None,
+        ),
+        ast.QuantumGate(
+            modifiers=[],
+            name=ast.Identifier(name="X"),
+            arguments=[],
+            qubits=[ast.Identifier(name="q2")],
+            duration=None,
+        ),
+    ]
+
+    # testing variables before calling to_ast
+    assert prog.declared_vars == declared_vars
+    assert list(prog.undeclared_vars.keys()) == undeclared_vars
+    assert prog._state.body == statement_ast
+
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
+
+    # testing variables after calling to_ast, checking mutations
+    assert prog.declared_vars == declared_vars
+    assert list(prog.undeclared_vars.keys()) == undeclared_vars
+    assert prog._state.body == statement_ast
 
 
 def test_discrete_waveform():
@@ -1400,6 +1699,7 @@ def test_discrete_waveform():
     ).strip()
 
     assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 
 def test_annotate():
@@ -1424,9 +1724,7 @@ def test_annotate():
     q1 = Qubit("q1", annotations=["some_qubit"])
     q2 = Qubit("q2", annotations=["other_qubit"])
 
-    @annotate_subroutine("inline")
-    @annotate_subroutine("optimize", "-O3")
-    @subroutine
+    @subroutine(annotations=["inline", ("optimize", "-O3")])
     def f(prog: Program, x: IntVar) -> IntVar:
         return x
 
@@ -1439,7 +1737,7 @@ def test_annotate():
         prog.gate(q1, "x")
     with oqpy.Else(prog):
         prog.annotate(("annotation-in-else"))
-        prog.delay(make_duration(1e-8), q1)
+        prog.delay(convert_float_to_duration(1e-8), q1)
     prog.annotate("annotation-after-if")
 
     prog.annotate("annotation-no-else-before-if")
@@ -1463,7 +1761,6 @@ def test_annotate():
     prog.annotate("second-invocation")
     prog.set(i, f(prog, i))
 
-    # todo: Fix printer for indentation of annotations
     expected = textwrap.dedent(
         """
         OPENQASM 3.0;
@@ -1526,7 +1823,33 @@ def test_annotate():
         """
     ).strip()
     assert prog.to_qasm(encal_declarations=True) == expected
+    _check_respects_type_hints(prog)
 
+
+def test_in_place_subroutine_declaration():
+    @subroutine(annotations=["inline", ("optimize", "-O3")])
+    def f(prog: Program, x: IntVar) -> IntVar:
+        return x
+
+    prog = Program()
+    i = IntVar(0, name="i")
+    prog.declare([i, f])
+    prog.increment(i, 1)
+
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        int[32] i = 0;
+        @inline
+        @optimize -O3
+        def f(int[32] x) -> int[32] {
+            return x;
+        }
+        i += 1;
+        """
+    ).strip()
+    assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
 
 def test_var_and_expr_matches():
     p1 = PortVar("p1")
@@ -1585,25 +1908,55 @@ def test_program_tracks_frame_waveform_vars():
     assert expr_matches(list(prog.waveform_vars), [constant_wf, discrete_wf])
 
 
+def test_duration_literal_arithmetic():
+    # Test that duration literals can be used as a part of expression.
+    port = oqpy.PortVar("myport")
+    frame = oqpy.FrameVar(port, 1e9, name="myframe")
+    delay_time = oqpy.convert_float_to_duration(50e-9)  # 50 ns
+    one_second = oqpy.convert_float_to_duration(1)  # 1 second
+    delay_repetition = 10
+
+    program = oqpy.Program()
+    repeated_delay = delay_repetition * delay_time
+    assert isinstance(repeated_delay, OQPyExpression)
+    assert repeated_delay.type == ast.DurationType()
+
+    program.delay(repeated_delay, frame)
+    program.shift_phase(frame, 2 * oqpy.pi * (delay_time / one_second))
+
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        port myport;
+        frame myframe = newframe(myport, 1000000000.0, 0);
+        delay[10 * 50.0ns] myframe;
+        shift_phase(myframe, 2 * pi * (50.0ns / 1s));
+        """
+    ).strip()
+
+    assert program.to_qasm() == expected
+    _check_respects_type_hints(program)
+
+
 def test_make_duration():
-    assert expr_matches(make_duration(1e-3), OQDurationLiteral(1e-3))
-    assert expr_matches(make_duration(OQDurationLiteral(1e-4)), OQDurationLiteral(1e-4))
+    assert expr_matches(convert_float_to_duration(1e-3), OQDurationLiteral(1e-3))
+    assert expr_matches(convert_float_to_duration(OQDurationLiteral(1e-4)), OQDurationLiteral(1e-4))
 
     class MyExprConvertible:
         def _to_oqpy_expression(self):
             return OQDurationLiteral(1e-5)
 
-    assert expr_matches(make_duration(MyExprConvertible()), OQDurationLiteral(1e-5))
+    assert expr_matches(convert_float_to_duration(MyExprConvertible()), OQDurationLiteral(1e-5))
 
     class MyToAst:
         def to_ast(self):
             return OQDurationLiteral(1e-6)
 
     obj = MyToAst()
-    assert make_duration(obj) is obj
+    assert convert_float_to_duration(obj) is obj
 
     with pytest.raises(TypeError):
-        make_duration("asdf")
+        convert_float_to_duration("asdf")
 
 
 def test_autoencal():
@@ -1627,18 +1980,19 @@ def test_autoencal():
             extern constant(duration, complex[float[64]]) -> waveform;
             port portname;
             frame framename = newframe(portname, 1000000000.0, 0);
-            waveform kernel = constant(1000.0ns, 1);
+            waveform kernel = constant(1.0us, 1);
         }
         int[32] i = 0;
         i += 1;
         cal {
-            play(framename, constant(1000.0ns, 0.5));
+            play(framename, constant(1.0us, 0.5));
             capture(framename, kernel);
         }
         """
     ).strip()
 
     assert prog.to_qasm(encal_declarations=True) == expected
+    _check_respects_type_hints(prog)
 
 
 def test_ramsey_example_blog():
@@ -1711,11 +2065,11 @@ def test_ramsey_example_blog():
         }
         duration delay_time = 0.0ns;
         defcal reset $1 {
-            delay[1000000.0ns];
+            delay[1.0ms];
         }
         defcal measure $1 {
-            play(tx_frame, constant(2400.0ns, 0.2));
-            capture(rx_frame, constant(2400.0ns, 1));
+            play(tx_frame, constant(2.4us, 0.2));
+            capture(rx_frame, constant(2.4us, 1));
         }
         defcal x90 $1 {
             play(xy_frame, gaussian(32.0ns, 8.0ns, 0.2063));
@@ -1735,3 +2089,199 @@ def test_ramsey_example_blog():
     ).strip()
 
     assert full_prog.to_qasm(encal_declarations=True) == expected
+    _check_respects_type_hints(full_prog)
+
+
+def test_constant_conversion():
+    w = oqpy.FloatVar(math.pi, name="w")
+    x = oqpy.FloatVar(3 * math.pi / 4, name="x")
+    y = oqpy.FloatVar(math.pi / 2, name="y")
+    z = oqpy.FloatVar(7 * math.pi, name="z")
+    prog = Program()
+    prog.declare([w, x, y, z])
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        float[64] w = pi;
+        float[64] x = 3 * pi / 4;
+        float[64] y = pi / 2;
+        float[64] z = 7 * pi;
+        """
+    ).strip()
+    assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
+
+    prog = Program(simplify_constants=False)
+    prog.declare([w, x, y, z])
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        float[64] w = 3.141592653589793;
+        float[64] x = 2.356194490192345;
+        float[64] y = 1.5707963267948966;
+        float[64] z = 21.991148575128552;
+        """
+    ).strip()
+    assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
+
+
+def test_oqpy_range():
+    prog = Program()
+    sum = oqpy.IntVar(0, "sum")
+    with ForIn(prog, range(10), "i") as i:
+        with ForIn(prog, oqpy.Range(1, i), "j") as j:
+            prog.increment(sum, j)
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        int[32] sum = 0;
+        for int i in [0:9] {
+            for int j in [1:i - 1] {
+                sum += j;
+            }
+        }
+        """
+    ).strip()
+    assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
+
+
+def test_duration_coercion():
+    frame = FrameVar(name="f1")
+    prog = Program()
+    v = oqpy.FloatVar(0.1, name="v")
+    prog.delay(v * 100e-9, frame)
+    d = oqpy.DurationVar(100e-9, name="d")
+    prog.shift_phase(frame, d * 1e4)
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        float[64] v = 0.1;
+        frame f1;
+        duration d = 100.0ns;
+        delay[v * 1e-07 * 1s] f1;
+        shift_phase(f1, d * 10000.0 / 1s);
+        """
+    ).strip()
+    assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
+
+
+def test_io_declaration():
+    x = oqpy.DurationVar("input", name="x")
+    y = oqpy.FloatVar("output", name="y")
+    wf = oqpy.WaveformVar("input", name="wf")
+    port = oqpy.PortVar(name="my_port", init_expression="input")
+    frame = oqpy.FrameVar(port, 5e9, 0, name="my_frame")
+
+    prog = Program()
+    prog.declare(x)
+    prog.set(y, 1)
+    prog.play(frame, wf)
+
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        input port my_port;
+        output float[64] y;
+        frame my_frame = newframe(my_port, 5000000000.0, 0);
+        input waveform wf;
+        input duration x;
+        y = 1;
+        play(my_frame, wf);
+        """
+    ).strip()
+    assert prog.to_qasm() == expected
+    _check_respects_type_hints(prog)
+
+
+def test_nested_subroutines():
+    @oqpy.subroutine
+    def f(prog: oqpy.Program) -> oqpy.IntVar:
+        i = oqpy.IntVar(name="i", init_expression=1)
+        with oqpy.If(prog, i == 1):
+            prog.increment(i, 1)
+        return i
+
+    @oqpy.subroutine
+    def g(prog: oqpy.Program) -> oqpy.IntVar:
+        return f(prog)
+
+    prog = oqpy.Program()
+    x = oqpy.IntVar(name="x")
+    prog.set(x, g(prog))
+
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        def f() -> int[32] {
+            int[32] i = 1;
+            if (i == 1) {
+                i += 1;
+            }
+            return i;
+        }
+        def g() -> int[32] {
+            return f();
+        }
+        int[32] x;
+        x = g();
+        """
+    ).strip()
+
+    assert prog.to_qasm() == expected
+
+
+def test_invalid_gates():
+    # missing qubits argument
+    prog = oqpy.Program()
+    with pytest.raises(TypeError):
+        with oqpy.gate(prog, None, "u"):
+            pass
+
+    # invalid argument type
+    prog = oqpy.Program()
+    with pytest.raises(ValueError):
+        q = oqpy.Qubit("q", needs_declaration=False)
+        with oqpy.gate(prog, q, "u", [oqpy.FloatVar(name="a")]) as a:
+            pass
+
+
+def test_gate_declarations():
+    prog = oqpy.Program()
+    q = oqpy.Qubit("q", needs_declaration=False)
+    with oqpy.gate(prog, q, "u", [oqpy.AngleVar(name="alpha"), oqpy.AngleVar(name="beta"), oqpy.AngleVar(name="gamma")]) as (alpha, beta, gamma):
+        prog.gate(q, "a", alpha)
+        prog.gate(q, "b", beta)
+        prog.gate(q, "c", gamma)
+        prog.gate(q, "d")
+    with oqpy.gate(prog, q, "rz", [oqpy.AngleVar(name="theta")], declare_here=True) as theta:
+        prog.gate(q, "u", theta, 0, 0)
+    with oqpy.gate(prog, q, "t"):
+        prog.gate(q, "rz", oqpy.pi / 4)
+
+    prog.gate(oqpy.PhysicalQubits[1], "t")
+    prog.gate(oqpy.PhysicalQubits[2], "t")
+
+    expected = textwrap.dedent(
+        """
+        OPENQASM 3.0;
+        gate u(alpha, beta, gamma) q {
+            a(alpha) q;
+            b(beta) q;
+            c(gamma) q;
+            d q;
+        }
+        gate t q {
+            rz(pi / 4) q;
+        }
+        gate rz(theta) q {
+            u(theta, 0, 0) q;
+        }
+        t $1;
+        t $2;
+        """
+    ).strip()
+
+    assert prog.to_qasm() == expected

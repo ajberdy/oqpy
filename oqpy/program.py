@@ -41,7 +41,7 @@ from oqpy.base import (
     to_ast,
 )
 from oqpy.pulse import FrameVar, PortVar, WaveformVar
-from oqpy.timing import make_duration
+from oqpy.timing import convert_duration_to_float, convert_float_to_duration
 
 __all__ = ["Program"]
 
@@ -91,15 +91,21 @@ class ProgramState:
 class Program:
     """A builder class for OpenQASM/OpenPulse programs."""
 
-    def __init__(self, version: Optional[str] = "3.0") -> None:
+    DURATION_MAX_DIGITS = 12
+
+    def __init__(self, version: Optional[str] = "3.0", simplify_constants: bool = True) -> None:
         self.stack: list[ProgramState] = [ProgramState()]
         self.defcals: dict[
             tuple[tuple[str, ...], str, tuple[str, ...]], ast.CalibrationDefinition
         ] = {}
         self.subroutines: dict[str, ast.SubroutineDefinition] = {}
+        self.gates: dict[str, ast.QuantumGateDefinition] = {}
         self.externs: dict[str, ast.ExternDeclaration] = {}
         self.declared_vars: dict[str, Var] = {}
         self.undeclared_vars: dict[str, Var] = {}
+        self.simplify_constants = simplify_constants
+        self.declared_subroutines: set[str] = set()
+        self.declared_gates: set[str] = set()
 
         if version is None or (
             len(version.split(".")) in [1, 2]
@@ -118,7 +124,12 @@ class Program:
         self._state.if_clause = other._state.if_clause
         self._state.finalize_if_clause()
         self.defcals.update(other.defcals)
-        self.subroutines.update(other.subroutines)
+        for name, subroutine_stmt in other.subroutines.items():
+            self._add_subroutine(
+                name, subroutine_stmt, needs_declaration=name not in other.declared_subroutines
+            )
+        for name, gate_stmt in other.gates.items():
+            self._add_gate(name, gate_stmt, needs_declaration=name not in other.declared_gates)
         self.externs.update(other.externs)
         for var in other.declared_vars.values():
             self._mark_var_declared(var)
@@ -203,12 +214,27 @@ class Program:
         """Add a statment to the current context's program state."""
         self._state.add_statement(stmt)
 
-    def _add_subroutine(self, name: str, stmt: ast.SubroutineDefinition) -> None:
+    def _add_subroutine(
+        self, name: str, stmt: ast.SubroutineDefinition, needs_declaration: bool = True
+    ) -> None:
         """Register a subroutine which has been used.
 
         Subroutines are added to the top of the program upon conversion to ast.
         """
         self.subroutines[name] = stmt
+        if not needs_declaration:
+            self.declared_subroutines.add(name)
+
+    def _add_gate(
+        self, name: str, stmt: ast.QuantumGateDefinition, needs_declaration: bool = True
+    ) -> None:
+        """Register a gate definition which has been used.
+
+        Gate definitions are added to the top of the program upon conversion to ast.
+        """
+        self.gates[name] = stmt
+        if not needs_declaration:
+            self.declared_gates.add(name)
 
     def _add_defcal(
         self,
@@ -238,7 +264,7 @@ class Program:
                     openpulse_externs.append(extern_statement)
                     break
             else:
-                if isinstance(extern_statement.return_type.type, openpulse_types):
+                if isinstance(extern_statement.return_type, openpulse_types):
                     openpulse_externs.append(extern_statement)
                 else:
                     openqasm_externs.append(extern_statement)
@@ -267,22 +293,39 @@ class Program:
                 if the variables have openpulse types, automatically wrap the
                 declarations in cal blocks.
         """
-        if not ignore_needs_declaration and self.undeclared_vars:
-            self.autodeclare(encal=encal_declarations)
+        mutating_prog = Program(self.version, self.simplify_constants)
+        mutating_prog += self
 
-        assert len(self.stack) == 1
-        self._state.finalize_if_clause()
-        if self._state.annotations:
-            warnings.warn(f"Annotation(s) {self._state.annotations} not applied to any statement")
+        if not ignore_needs_declaration and mutating_prog.undeclared_vars:
+            mutating_prog.autodeclare(encal=encal_declarations)
+
+        assert len(mutating_prog.stack) == 1
+        mutating_prog._state.finalize_if_clause()
+        if mutating_prog._state.annotations:
+            warnings.warn(
+                f"Annotation(s) {mutating_prog._state.annotations} not applied to any statement"
+            )
         statements = []
         if include_externs:
-            statements += self._make_externs_statements(encal_declarations)
-        statements += list(self.subroutines.values()) + self._state.body
+            statements += mutating_prog._make_externs_statements(encal_declarations)
+        statements += (
+            [
+                mutating_prog.subroutines[subroutine_name]
+                for subroutine_name in mutating_prog.subroutines
+                if subroutine_name not in mutating_prog.declared_subroutines
+            ]
+            + [
+                mutating_prog.gates[gate_name]
+                for gate_name in mutating_prog.gates
+                if gate_name not in mutating_prog.declared_gates
+            ]
+            + mutating_prog._state.body
+        )
         if encal:
             statements = [ast.CalibrationStatement(statements)]
         if encal_declarations:
             statements = [ast.CalibrationGrammarDeclaration("openpulse")] + statements
-        prog = ast.Program(statements=statements, version=self.version)
+        prog = ast.Program(statements=statements, version=mutating_prog.version)
         if encal_declarations:
             MergeCalStatementsPass().visit(prog)
         return prog
@@ -339,12 +382,18 @@ class Program:
             openqasm_vars.reverse()
 
         for var in openqasm_vars:
-            stmt = var.make_declaration_statement(self)
+            if callable(var) and hasattr(var, "subroutine_declaration"):
+                name, stmt = var.subroutine_declaration
+                self._add_subroutine(name, stmt, needs_declaration=False)
+            else:
+                stmt = var.make_declaration_statement(self)
+                self._mark_var_declared(var)
+
             if to_beginning:
                 self._state.body.insert(0, stmt)
             else:
                 self._add_statement(stmt)
-            self._mark_var_declared(var)
+
         if openpulse_vars:
             cal_stmt = ast.CalibrationStatement([])
             for var in openpulse_vars:
@@ -363,7 +412,7 @@ class Program:
         """Apply a delay to a set of qubits or frames."""
         if not isinstance(qubits_or_frames, Iterable):
             qubits_or_frames = [qubits_or_frames]
-        ast_duration = to_ast(self, make_duration(time))
+        ast_duration = to_ast(self, convert_float_to_duration(time))
         ast_qubits_or_frames = map_to_ast(self, qubits_or_frames)
         self._add_statement(ast.DelayInstruction(ast_duration, ast_qubits_or_frames))
         return self
@@ -392,32 +441,37 @@ class Program:
 
     def set_phase(self, frame: AstConvertible, phase: AstConvertible) -> Program:
         """Set the phase of a particular frame."""
-        self.function_call("set_phase", [frame, phase])
+        # We use make_float to force phase to be a unitless (i.e. non-duration) quantity.
+        # Users are expected to keep track the units that are not expressible in openqasm
+        # such as s^{-1}. For instance, in 2 * oqpy.pi * tppi * DurationVar(1e-8),
+        # tppi is a float but has a frequency unit. This will coerce the result type
+        # to a float by assuming the duration should be represented in seconds."
+        self.function_call("set_phase", [frame, convert_duration_to_float(phase)])
         return self
 
     def shift_phase(self, frame: AstConvertible, phase: AstConvertible) -> Program:
         """Shift the phase of a particular frame."""
-        self.function_call("shift_phase", [frame, phase])
+        self.function_call("shift_phase", [frame, convert_duration_to_float(phase)])
         return self
 
     def set_frequency(self, frame: AstConvertible, freq: AstConvertible) -> Program:
         """Set the frequency of a particular frame."""
-        self.function_call("set_frequency", [frame, freq])
+        self.function_call("set_frequency", [frame, convert_duration_to_float(freq)])
         return self
 
     def shift_frequency(self, frame: AstConvertible, freq: AstConvertible) -> Program:
         """Shift the frequency of a particular frame."""
-        self.function_call("shift_frequency", [frame, freq])
+        self.function_call("shift_frequency", [frame, convert_duration_to_float(freq)])
         return self
 
     def set_scale(self, frame: AstConvertible, scale: AstConvertible) -> Program:
         """Set the amplitude scaling of a particular frame."""
-        self.function_call("set_scale", [frame, scale])
+        self.function_call("set_scale", [frame, convert_duration_to_float(scale)])
         return self
 
     def shift_scale(self, frame: AstConvertible, scale: AstConvertible) -> Program:
         """Shift the amplitude scaling of a particular frame."""
-        self.function_call("shift_scale", [frame, scale])
+        self.function_call("shift_scale", [frame, convert_duration_to_float(scale)])
         return self
 
     def returns(self, expression: AstConvertible) -> Program:
@@ -472,10 +526,14 @@ class Program:
     def _do_assignment(self, var: AstConvertible, op: str, value: AstConvertible) -> None:
         """Helper function for variable assignment operations."""
         if isinstance(var, classical_types.DurationVar):
-            value = make_duration(value)
+            value = convert_float_to_duration(value)
+        var_ast = to_ast(self, var)
+        if isinstance(var_ast, ast.IndexExpression):
+            assert isinstance(var_ast.collection, ast.Identifier)
+            var_ast = ast.IndexedIdentifier(name=var_ast.collection, indices=[var_ast.index])
         self._add_statement(
             ast.ClassicalAssignment(
-                to_ast(self, var),
+                var_ast,
                 ast.AssignmentOperator[op],
                 to_ast(self, value),
             )
