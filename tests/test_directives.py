@@ -1766,7 +1766,7 @@ def test_annotate():
         OPENQASM 3.0;
         defcalgrammar "openpulse";
         cal {
-        @annotating_extern_decl
+            @annotating_extern_decl
             extern gaussian(duration, duration, float[64], float[64]) -> waveform;
         }
         @inline
@@ -1775,12 +1775,12 @@ def test_annotate():
             return x;
         }
         cal {
-        @makeport
-        @some_keyword some_command
+            @makeport
+            @some_keyword some_command
             port some_port;
-        @makeframe
+            @makeframe
             frame q0_transmon_xy_frame = newframe(some_port, 3911851971.26885, 0);
-        @makepulse
+            @makepulse
             waveform rabi_pulse_wf = gaussian(52.0ns, 13.0ns, 1.0, 0.0);
         }
         @some-int
@@ -1791,31 +1791,31 @@ def test_annotate():
         f(i);
         @annotation-before-if
         if (i != 0) {
-        @annotation-in-if
+            @annotation-in-if
             x q1;
         } else {
-        @annotation-in-else
+            @annotation-in-else
             delay[10.0ns] q1;
         }
         @annotation-after-if
         @annotation-no-else-before-if
         if (i != 0) {
-        @annotation-no-else-in-if
+            @annotation-no-else-in-if
             x q1;
         }
         @annotation-no-else-after-if
         @make-for-loop with additional info
         for int shot in [1:1000] {
-        @declaring_j
-        @other-int
+            @declaring_j
+            @other-int
             int[32] j = 0;
-        @declaring q2
-        @other_qubit
+            @declaring q2
+            @other_qubit
             qubit q2;
-        @make-set-scale
+            @make-set-scale
             set_scale(q0_transmon_xy_frame, -0.2);
             play(q0_transmon_xy_frame, rabi_pulse_wf);
-        @playing gate
+            @playing gate
             U1 q1;
         }
         @second-invocation
