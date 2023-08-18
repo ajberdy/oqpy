@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import contextlib
+from numbers import Number
 import warnings
 from typing import TYPE_CHECKING, Iterator, cast
 
@@ -89,6 +90,9 @@ class OQDurationLiteral(OQPyExpression):
 
     def to_ast(self, program: Program) -> ast.DurationLiteral:
         # Todo (#53): make better units?
+        if not isinstance(self.duration_seconds, Number):
+            return ast.DurationLiteral(1e9 * self.duration_seconds, ast.TimeUnit.ns)
+
         n = program.DURATION_MAX_DIGITS
         if self.duration_seconds >= 1:
             return ast.DurationLiteral(round(self.duration_seconds, n), ast.TimeUnit.s)
