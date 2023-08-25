@@ -216,7 +216,6 @@ def test_complex_numbers_declaration():
     _check_respects_type_hints(prog)
 
 
-
 def test_array_declaration():
     b = ArrayVar(name="b", init_expression=[True, False], dimensions=[2], base_type=BoolVar)
     i = ArrayVar(name="i", init_expression=[0, 1, 2, 3, 4], dimensions=[5], base_type=IntVar)
@@ -288,7 +287,6 @@ def test_array_declaration():
     _check_respects_type_hints(prog)
 
 
-
 def test_non_trivial_array_access():
     prog = oqpy.Program()
     port = oqpy.PortVar(name="my_port")
@@ -325,7 +323,6 @@ def test_non_trivial_array_access():
 
     assert prog.to_qasm() == expected
     _check_respects_type_hints(prog)
-
 
 
 def test_non_trivial_variable_declaration():
@@ -1850,6 +1847,7 @@ def test_in_place_subroutine_declaration():
     ).strip()
     assert prog.to_qasm() == expected
     _check_respects_type_hints(prog)
+
 
 def test_var_and_expr_matches():
     p1 = PortVar("p1")

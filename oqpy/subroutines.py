@@ -30,7 +30,7 @@ from oqpy.classical_types import OQFunctionCall, _ClassicalVar
 from oqpy.quantum_types import Qubit
 from oqpy.timing import convert_float_to_duration
 
-__all__ = ["subroutine", "annotate_subroutine", "declare_extern", "declare_waveform_generator"]
+__all__ = ["subroutine", "declare_extern", "declare_waveform_generator"]
 
 SubroutineParams = [oqpy.Program, VarArg(AstConvertible)]
 
@@ -145,7 +145,6 @@ def subroutine(
     def wrapper(
         program: oqpy.Program,
         *args: AstConvertible,
-        annotations: Sequence[str | tuple[str, str]] = (),
     ) -> OQFunctionCall:
         program.defcals.update(inner_prog.defcals)
         for name, subroutine_stmt in inner_prog.subroutines.items():
@@ -160,28 +159,6 @@ def subroutine(
 
     setattr(wrapper, "subroutine_declaration", (name, stmt))
     return wrapper
-
-
-def annotate_subroutine(keyword: str, command: str | None = None) -> Callable[[FnType], FnType]:
-    """Add annotation to a subroutine."""
-
-    def annotate_subroutine_decorator(func: FnType) -> FnType:
-        @functools.wraps(func)
-        def wrapper(
-            program: oqpy.Program,
-            *args: AstConvertible,
-            annotations: Sequence[str | tuple[str, str]] = (),
-        ) -> OQFunctionCall:
-            new_ann: str | tuple[str, str]
-            if command is not None:
-                new_ann = keyword, command
-            else:
-                new_ann = keyword
-            return func(program, *args, annotations=list(annotations) + [new_ann])
-
-        return wrapper  # type: ignore[return-value]
-
-    return annotate_subroutine_decorator
 
 
 def declare_extern(
